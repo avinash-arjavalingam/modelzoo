@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"time"
@@ -15,6 +17,8 @@ import (
 
 	modelzoo "github.com/harbor-ml/modelzoo/go/modelzoo/protos"
 	log "github.com/sirupsen/logrus"
+	cb_client "github.com/cloudburstclient"
+	cb_proto "github.com/proto/common"
 )
 
 func (s *ProxyServer) getModelVersion(modelName string) schema.ModelVersion {
@@ -111,21 +115,49 @@ func (s *ProxyServer) Inference(ctx context.Context, payload *modelzoo.Payload) 
 		return nil, status.Error(codes.Internal, fmt.Sprint(err))
 	}
 
-	url := metadata["clipper_url"]
+	// url := metadata["clipper_url"]
 	encodedReq := base64.StdEncoding.EncodeToString(serializedPayload)
 	httpPayload := map[string]string{"input": encodedReq}
+	// httpPayload := map[string]string{"hello": "world"}
+
+	testing_client := cb_client.NewCloudburstClient("127.0.0.1", "127.0.0.1", true)
+	argsMap := map[string]*cb_proto.Arguments{}
+    args := &cb_proto.Arguments{}
+    // httpPayloadBytes := []byte(encodedReq)
+    httpPayloadBytes, _ := json.Marshal(httpPayload)
+    args.Values = append(args.Values, &cb_proto.Value{Body: httpPayloadBytes, Type: cb_proto.SerializerType_STRING})
+    argsMap["torch_class"] = args
 
 	startTime := time.Now()
-	resp := postJSON(url, httpPayload)
+
+
+	respFuture := testing_client.CallDag("torch_dag", argsMap, true)
+	respRaw :=  (*[]byte)(respFuture.Get())
+	var dag_resp map[string]interface{}
+	json.Unmarshal(*respRaw, &dag_resp)
+	
+	// resp := postJSON(url, httpPayload)
+	defer s.logger.WithFields(log.Fields{
+		"client":           testing_client,
+		// "argsMap":          argsMap,
+		"respType":         fmt.Sprintf("%T", encodedReq),
+		"respRawLen":       len(*respRaw),
+		"respRaw":          hex.EncodeToString(*respRaw),
+		"resp":             dag_resp,
+	}).Info("New inference request")
 	endTime := time.Now()
 
+	resp := dag_resp
+	
 	if resp["default"].(bool) == true {
 		s.saveQueryResult(modelName, token, startTime, endTime, 1)
 		return nil, status.Error(
 			codes.Internal, fmt.Sprintf("Query failed: %s", resp["default_explanation"].(string)))
 	}
+	
 
 	decoded, err := base64.StdEncoding.DecodeString(resp["output"].(string))
+	// decoded, err := base64.StdEncoding.DecodeString(resp)
 	if err != nil {
 		s.saveQueryResult(modelName, token, startTime, endTime, 1)
 		return nil, err
